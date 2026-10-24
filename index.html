@@ -1,0 +1,148 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Boule Duel</title>
+<style>
+:root{--bg:#f4f1ea;--fg:#1d1d1f;--ball:#e4572e;--me:#2a6f97;--opp:#8a5a9e;--panel:#fffdf8;--line:#d9d4c7;color-scheme:light}
+@media (prefers-color-scheme:dark){:root{--bg:#15161a;--fg:#f0eee8;--ball:#ff7a4d;--me:#5fb3e0;--opp:#c79be0;--panel:#1f2026;--line:#34353d;color-scheme:dark}}
+html,body{height:100%;margin:0}
+body{background:var(--bg);color:var(--fg);font-family:system-ui,-apple-system,"Segoe UI",sans-serif;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:8px;touch-action:none;user-select:none}
+.hud{display:flex;justify-content:space-between;width:min(92vw,400px);font-weight:600}
+.wrap{position:relative;width:min(92vw,400px)}
+canvas{width:100%;max-height:70vh;aspect-ratio:2/3;background:var(--panel);border-radius:6px;display:block}
+#lobby{position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:12px;background:var(--panel);border-radius:6px;padding:20px;text-align:center}
+#lobby h1{margin:0;font-size:1.5rem}
+#lobby input{font:inherit;font-size:1.3rem;text-align:center;width:9ch;padding:8px;border:2px solid var(--line);border-radius:8px;background:var(--bg);color:var(--fg)}
+button{font:inherit;font-weight:600;padding:10px 18px;border:0;border-radius:8px;background:var(--me);color:#fff;cursor:pointer}
+button.alt{background:var(--line);color:var(--fg)}
+.row{display:flex;gap:8px;flex-wrap:wrap;justify-content:center}
+p{margin:0}#msg{font-size:.85rem;opacity:.75;min-height:1.2em}
+</style>
+</head>
+<body>
+<div class="hud"><span id="l">Toi : 0</span><span id="code"></span><span id="r">Adversaire : 0</span></div>
+<div class="wrap">
+<canvas id="c" width="400" height="600"></canvas>
+<div id="lobby">
+<h1>Boule Duel</h1>
+<p>Le premier à 5 points gagne.</p>
+<div class="row"><button id="mk">Créer une partie</button></div>
+<p>ou rejoindre avec un code :</p>
+<div class="row"><input id="ci" maxlength="4" placeholder="code" autocomplete="off"><button id="jn" class="alt">Rejoindre</button></div>
+<p id="lmsg"></p>
+</div>
+</div>
+<p id="msg"></p>
+<script src="https://unpkg.com/peerjs@1.5.4/dist/peerjs.min.js"></script>
+<script>
+const W=400,H=600,PW=90,PH=12,R=10,WIN=5,PREFIX='bouleduel-';
+const cv=document.getElementById('c'),ctx=cv.getContext('2d'),$=id=>document.getElementById(id);
+let peer=null,conn=null,role=null,myX=W/2,oppX=W/2,hostX=W/2,code='';
+let ball={x:W/2,y:H/2,vx:0,vy:0},score=[0,0],st='wait',serveAt=0,overAt=0,running=false;
+const css=v=>getComputedStyle(document.documentElement).getPropertyValue(v).trim();
+const lm=t=>$('lmsg').textContent=t;
+
+function enter(){$('lobby').style.display='none';$('code').textContent='Code : '+code;if(!running){running=true;loop()}}
+
+function create(){
+  code=Math.random().toString(36).slice(2,6);role='host';lm('Création…');
+  peer=new Peer(PREFIX+code);
+  peer.on('error',e=>{if(e.type==='unavailable-id')create();else lm('Erreur : '+e.type)});
+  peer.on('open',()=>{enter();history.replaceState(null,'','#'+code)});
+  peer.on('connection',c=>{
+    if(conn){c.close();return}
+    conn=c;
+    c.on('open',()=>{score=[0,0];serve(1)});
+    c.on('data',d=>{if(d&&typeof d.x==='number')oppX=Math.max(PW/2,Math.min(W-PW/2,d.x))});
+    c.on('close',()=>{conn=null;st='wait';score=[0,0];ball={x:W/2,y:H/2,vx:0,vy:0}});
+  });
+}
+function join(c){
+  code=c.toLowerCase().replace(/[^a-z0-9]/g,'');if(!code){lm('Entre un code.');return}
+  role='guest';lm('Connexion…');
+  peer=new Peer();
+  peer.on('error',e=>lm(e.type==='peer-unavailable'?'Code introuvable.':'Erreur : '+e.type));
+  peer.on('open',()=>{
+    conn=peer.connect(PREFIX+code,{reliable:false});
+    conn.on('open',enter);
+    conn.on('data',d=>{
+      if(d.b){ball.x+=(d.b[0]-ball.x)*.5;ball.y+=(d.b[1]-ball.y)*.5}
+      if(d.s)score=d.s;if(d.st)st=d.st;
+      if(typeof d.x==='number')hostX=d.x;
+    });
+    conn.on('close',()=>{st='lost'});
+  });
+}
+$('mk').onclick=create;$('jn').onclick=()=>join($('ci').value);
+if(/^#[a-z0-9]{4}$/i.test(location.hash)){$('ci').value=location.hash.slice(1)}
+
+function serve(dir){
+  ball={x:W/2,y:H/2,vx:(Math.random()<.5?-1:1)*(1.5+Math.random()*1.5),vy:3.6*dir};
+  st='serve';serveAt=performance.now()+1500;
+}
+function point(dir){
+  if(score[0]>=WIN||score[1]>=WIN){st='over';overAt=performance.now();ball={x:W/2,y:H/2,vx:0,vy:0}}
+  else serve(dir);
+}
+function sim(){
+  if(!conn)return;
+  const now=performance.now();
+  if(st==='serve'){ball.x=W/2;ball.y=H/2;if(now>=serveAt)st='play'}
+  else if(st==='over'){if(now-overAt>4000){score=[0,0];serve(1)}}
+  else if(st==='play'){
+    ball.x+=ball.vx;ball.y+=ball.vy;
+    if(ball.x<R){ball.x=R;ball.vx=Math.abs(ball.vx)}
+    if(ball.x>W-R){ball.x=W-R;ball.vx=-Math.abs(ball.vx)}
+    const bounce=(px,dir)=>{
+      const o=Math.max(-1,Math.min(1,(ball.x-px)/(PW/2)));
+      const sp=Math.min(Math.hypot(ball.vx,ball.vy)*1.05,10);
+      ball.vx=o*sp*.8;ball.vy=dir*Math.sqrt(Math.max(sp*sp-ball.vx*ball.vx,4));
+    };
+    if(ball.vy>0&&ball.y+R>=H-40&&ball.y<H-26&&Math.abs(ball.x-myX)<PW/2+R){ball.y=H-40-R;bounce(myX,-1)}
+    if(ball.vy<0&&ball.y-R<=40&&ball.y>26&&Math.abs(ball.x-oppX)<PW/2+R){ball.y=40+R;bounce(oppX,1)}
+    if(ball.y>H+R){score[1]++;point(-1)}
+    else if(ball.y<-R){score[0]++;point(1)}
+  }
+}
+setInterval(()=>{
+  if(!conn||!conn.open)return;
+  if(role==='host')conn.send({x:Math.round(myX),b:[Math.round(ball.x*10)/10,Math.round(ball.y*10)/10],s:score,st});
+  else conn.send({x:Math.round(W-myX)});
+},33);
+
+function paddle(x,y,col){ctx.fillStyle=col;ctx.beginPath();ctx.roundRect(x-PW/2,y,PW,PH,6);ctx.fill()}
+function draw(){
+  ctx.clearRect(0,0,W,H);
+  const flip=role==='guest';
+  ctx.save();
+  if(flip){ctx.translate(W,H);ctx.rotate(Math.PI)}
+  ctx.fillStyle=css('--line');ctx.fillRect(0,H/2-1,W,2);ctx.fillRect(0,0,4,H);ctx.fillRect(W-4,0,4,H);
+  const hx=role==='host'?myX:hostX,gx=role==='guest'?W-myX:oppX;
+  paddle(hx,H-40,flip?css('--opp'):css('--me'));
+  paddle(gx,28,flip?css('--me'):css('--opp'));
+  ctx.fillStyle=css('--ball');ctx.beginPath();ctx.arc(ball.x,ball.y,R,0,6.28);ctx.fill();
+  ctx.restore();
+  const mine=flip?1:0;
+  $('l').textContent='Toi : '+score[mine];$('r').textContent='Adversaire : '+score[1-mine];
+  let m='';
+  if(st==='lost')m='Connexion perdue. Recharge la page.';
+  else if(role==='host'&&!conn)m='En attente d’un adversaire… envoie-lui le code ou le lien.';
+  else if(st==='serve')m='Prêt ?';
+  else if(st==='over')m=(score[mine]>score[1-mine]?'Tu as gagné !':'Tu as perdu…')+' Nouvelle manche dans un instant.';
+  $('msg').textContent=m;
+}
+function loop(){if(role==='host')sim();draw();requestAnimationFrame(loop)}
+function move(e){
+  const r=cv.getBoundingClientRect();let x=(e.clientX-r.left)/r.width*W;
+  if(role==='guest')x=W-x;
+  myX=Math.max(PW/2,Math.min(W-PW/2,role==='guest'?W-x:x));
+}
+addEventListener('pointermove',move);addEventListener('pointerdown',move);
+const keys={};
+addEventListener('keydown',e=>keys[e.key]=true);addEventListener('keyup',e=>keys[e.key]=false);
+setInterval(()=>{const d=(keys.ArrowRight?7:0)-(keys.ArrowLeft?7:0);if(d)myX=Math.max(PW/2,Math.min(W-PW/2,myX+d))},16);
+</script>
+</body>
+</html>
